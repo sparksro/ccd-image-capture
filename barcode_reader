@@ -1,0 +1,171 @@
+import numpy as np
+import cv2
+from Tkinter import *
+import Tkinter as tk
+import tkMessageBox
+import Image, ImageTk
+from asprise_ocr_api import *
+
+# version 0.5
+# This program uses a higher resolution web camera to grab a barcode image do a bit of processing and then
+# feed it to a translator library.  The web cam installed in my laptop was not high enough resolution.
+# The decoder library is a aprise and I am currently using the evaluation version as this program is mostly
+# practice and proof of concept.  The other main modules used are CV2 3.1 image manipulation
+# library and Tkinter to build windows and a user interface.  Currently this is running in Python 2.7
+
+# Use notes: This program is not entirely robust.  It seems to do better with the barcode taking about 1/6 of the
+# image or more.  Use good lighting and make sure the bars are in focus.  The driver for my usb web cam seems to
+# cause errors also as it looses contact with the camera periodically.  Currently running in Ubuntu 16.04 but
+# with  the proper libraries installed it should also run in IOS and Windows but that is currently un-tested.
+# Several references I read recommended doubling the size of the image. This proved at least in my
+# testing to make it less robust and that part of the code was for now commented out.
+
+# the frame that shows the camera picture before its taken
+def show_frame():
+    _, frame = cam.read()
+    frame = cv2.flip(frame, 1)
+    try:
+        cv2image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+    except:
+        print "Sorry but there was a problem with the camera. Try more light."
+        close()
+    img = Image.fromarray(cv2image)
+    imgtk = ImageTk.PhotoImage(image=img)
+    lmain.imgtk = imgtk
+    lmain.configure(image=imgtk)
+    lmain.after(10, show_frame)
+
+# releases the camera and closes windows
+def closeWindow():
+    cam.release()
+    cv2.destroyAllWindows()
+
+def close():
+    exit()
+
+# takes the picture, triggered by the
+def snapPicture(event):
+    retval, img = cam.read()
+    file = "temp_barcode.png"
+    cv2.imwrite(file, img)
+    closeWindow()
+    findBarcode(file)
+
+# the code bellow adapted and upgraded to run in openCV 3.1.0
+# http://www.pyimagesearch.com/2014/11/24/detecting-barcodes-images-python-opencv/
+def findBarcode(img):
+    image = cv2.imread(img)
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # compute the Scharr gradient magnitude representation of the images
+    # in both the x and y direction
+    gradX = cv2.Sobel(gray, cv2.CV_64F,1,0,ksize=-1)
+    gradY = cv2.Sobel(gray, cv2.CV_64F,0,1,ksize=-1)
+
+    # subtract the y-gradient from the x-gradient
+    gradient = cv2.subtract(gradX, gradY)
+    gradient = cv2.convertScaleAbs(gradient)
+
+    # blur and threshold the image
+    blurred = cv2.blur(gradient, (7, 7))
+    (_, thresh) = cv2.threshold(blurred, 225, 255, cv2.THRESH_BINARY)
+
+    # construct a closing kernel and apply it to the thresholded image
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 7))
+    closed = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
+
+    # perform a series of erosions and dilations
+    closed = cv2.erode(closed, None, iterations = 4)
+    closed = cv2.dilate(closed, None, iterations = 4)
+
+    # find the contours in the thresholded image, then sort the contours
+    # by their area, keeping only the largest one
+    _, cnts, _= cv2.findContours(closed.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    c = sorted(cnts, key=cv2.contourArea, reverse=True)[0]
+
+    # compute the rotated bounding box of the largest contour - outlines the barcode
+    rect = cv2.minAreaRect(c)
+    box = np.int0(cv2.boxPoints(rect))
+
+    # uses box above to obtain box location values and then crop out the barcode
+    x_multiplier = 0.05
+    y_multiplier = 0.04
+    width =  box[[2],[0]][0] - box[[1],[0]][0]
+    startX = box[[1],[0]][0] - (width * x_multiplier)
+    endX = box[[2],[0]][0] + (width * x_multiplier)
+    startY = box[[1],[1]][0] - (width * y_multiplier)
+    endY = box[[0],[1]][0] + (width * y_multiplier)
+    cropped = image[startY:endY, startX:endX]
+
+    # enlarge the image
+    newY, newX = cropped.shape[1]*1.75, cropped.shape[0]*1.75
+
+    # try:
+    #     enlarged = cv2.resize(cropped, (newY,newX))
+    # except:
+    #     print "Image enlarging error.  Try more light."
+    #     close()
+
+    kernel_sharpen = np.array([[-1, -1, -1, -1, -1],
+                               [-1, 2, 2, 2, -1],
+                               [-1, 2, 8, 2, -1],
+                               [-1, 2, 2, 2, -1],
+                               [-1, -1, -1, -1, -1]]) / 8.0
+    # apply the sharpen kernel to the image - this was interfearing in lower light situations
+    #sharpened = cv2.filter2D(enlarged, -1, kernel_sharpen)
+
+    # save the image file so we can feed it to the aspire decode library then print the output
+    file = "test_barcode.png"
+    cv2.imwrite(file, cropped)
+    Ocr.set_up()  # one time setup
+    ocrEngine = Ocr()
+    ocrEngine.start_engine("eng")
+
+    try:
+        s = ocrEngine.recognize("test_barcode.png", -1, -1, -1, -1, -1, OCR_RECOGNIZE_TYPE_BARCODE,
+                                OCR_OUTPUT_FORMAT_PLAINTEXT)
+        if( s is not None and s[2] is not ' ' ):
+            print "Code Type:", s[2:8]
+            print "Bar Code: ", s[10:23]
+    except:
+        print "No output.  Try better lighting."
+    close()
+
+#Set up GUI
+window = tk.Tk()  #Makes main window
+window.wm_title("Barcode Reader")
+window.config(background="grey")
+# also detect either enter key in addition to the capture button bellow
+window.bind('<Return>', snapPicture)
+window.bind('<KP_Enter>', snapPicture)
+
+#Graphics window
+imageFrame = tk.Frame(window, width=300, height=250)
+imageFrame.grid(row=0, column=0, padx=10, pady=2)
+
+#Capture video frames
+lmain = tk.Label(imageFrame)
+lmain.grid(row=0, column=0)
+try:
+    cam = cv2.VideoCapture(0)
+    cam.open(0)
+except:
+    print("Please turn your cammera on with the camera key.")
+    tkMessageBox.showinfo("Error", "Please turn your camera on with the camera key!")
+    exit()
+
+# bottom frame to position button
+bottomFrame = tk.Frame(window, width=600, height=100, bg="gray")
+bottomFrame.grid( row = 600, column=0, padx=10, pady=2)
+button1 = Button(bottomFrame, text="Capture", command=snapPicture)
+button1.grid(row = 600, column=1, padx =4)
+ButtonLabel = Label(window, text="Place barcode in front of your camera & click the button or hit Enter", font=("Helvetica", 14), bg="gray")
+button1.bind('<Button-1>', snapPicture)
+ButtonLabel.grid()
+show_frame()
+window.mainloop()  #Starts GUI
+
+cam.release()
+cv2.destroyAllWindows()
+close()
